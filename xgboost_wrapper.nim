@@ -32,7 +32,7 @@ type
   # below for a C++ arg likeso, `DMatrixHandle dmats[]`, will be `ptr CArray[DMatrixHandle]`
   bst_ulong = culonglong
 
-proc XGDMatrixCreateFromFile(fname: cstring, silent: cint, `out`: DMatrixHandle): cint
+proc XGDMatrixCreateFromFile(fname: cstring, silent: cint, `out`: ptr DMatrixHandle): cint
 # note the backticks below for the `out` parameter mask the 'out' keyword (this may
 # not be necessary, could just use a diff arg name?)
 proc XGDMatrixCreateFromMat(data: ptr cfloat, nrow: bst_ulong, ncol: bst_ulong,
@@ -40,6 +40,7 @@ proc XGDMatrixCreateFromMat(data: ptr cfloat, nrow: bst_ulong, ncol: bst_ulong,
 proc XGBGetLastError(): cstring
 proc XGBoosterCreate (dmats: ptr CArray[DMatrixHandle], len: bst_ulong, `out`: ptr BoosterHandle): cint
 proc XGBoosterSetParam(handle: BoosterHandle, name: cstring, value: cstring): cint
+proc XGDMatrixSetDenseInfo(handle: DMatrixHandle, field: cstring, data: pointer, size: bst_ulong, `type`: cint): cint
 proc XGDMatrixSetFloatInfo (handle: DMatrixHandle, field: cstring, array: ptr cfloat, len: bst_ulong): cint
 proc XGBoosterUpdateOneIter(handle: BoosterHandle, iter: cint, dtrain: DMatrixHandle): cint
 # below, as per Nim docs cstringArray is equivalent to ptr UncheckedArray[cstring] = ptr CArray[cstring]
