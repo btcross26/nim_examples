@@ -1,11 +1,10 @@
-# Train and XGBoost model using the C API directly
+# Train an XGBoost model using the C API directly
 #
 # This requires wrapping the functions and types that we will use from the
-# XGBoost C API that we need to use, then calling the wrapped functionality
-# accordingly to load data and train the model. Several C/C++ calls are also
-# replaced by equivalent Nim calls (e.g., exit replaced by quit), and the
-# safe_xgboost #define procedure is replaced with ta template that is used
-# to block the calls to XGBoost procedures.
+# XGBoost C API, then calling the wrapped functionality accordingly to load data
+# and train the model. Several C/C++ calls are also replaced by equivalent Nim
+# calls (e.g., exit replaced by quit), and the safe_xgboost #define procedure is
+# replaced with a template that is used to wrap the calls to XGBoost procedures.
 
 # author: Benjamin Cross
 # created: 2021-03-31
@@ -28,7 +27,7 @@ template safe_xgboost(procCall: untyped) =
       "xgboost api call", $XGBGetLastError()])
     quit(1)   # replaces C++ exit(1)
 
-# C++ wrappers for using the XGBoost C API as in the example here
+# Wrappers for using the XGBoost C API as in the example here
 # https://xgboost.readthedocs.io/en/latest/dev/c__api_8h.html
 {.push header: "xgboost/c_api.h", importc, dynlib: libName.}
 type
@@ -41,6 +40,9 @@ proc XGDMatrixCreateFromFile(fname: cstring, silent: cint, `out`: ptr DMatrixHan
 
 proc XGDMatrixCreateFromMat(data: ptr cfloat, nrow: bst_ulong, ncol: bst_ulong,
   missing: cfloat, `out`: ptr DMatrixHandle): cint
+
+proc XGDMatrixCreateFromMat_omp(data: ptr cfloat, nrow: bst_ulong, ncol: bst_ulong,
+  missing: cfloat, `out`: ptr DMatrixHandle, thread: cint): cint
 
 proc XGBGetLastError(): cstring
 

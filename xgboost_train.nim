@@ -1,14 +1,13 @@
 # compiler options to include - note --clib option does not work correctly
-# so need to use --passL instead to specify xgboost library
+# so need to use --passL instead to specify xgboost library. Also, note the use
+# of anaconda here since this is being run in a conda environment with nim
+# installed.
 # -d:macOS
 # --cincludes:$HOME/anaconda3/envs/nim_demo/include
 # --clibdir:$HOME/anaconda3/envs/nim_demo/lib
 # --passL:"-lxgboost"
 # --passL:"-rpath $HOME/anaconda3/envs/nim_demo/lib"
-
-# dealloc train, test, booster, train_labels, test_labels
-# dmatrix values and booster
-# release np buffers at bottom
+# --threads-on
 
 # author: Benjamin Cross
 # created: 2021-03-31
@@ -20,6 +19,13 @@ include xgboost_wrapper
 import strutils
 import strformat
 import nimpy, nimpy/[py_types, raw_buffers]
+
+# create a dummy allocated space for ptr initialization
+# c demo is tricky here - to work in Nim, must initialize the void pointer as
+# it seems that the default intialization in Nim is nil. This pointer is used
+# as a common allocated space to intialize pointers so that they are not nil
+# and do not throw errors in the wrapped XGBoost interfaces.
+let ptrInitializer: pointer = alloc0(1)
 
 # the code below is taken directly from the xgboost C API example and modified
 # accordingly to work with Nim syntax and the example dataset
@@ -85,19 +91,23 @@ getBuffer(y_train, y_train_buffer, PyBUF_STRIDES)
 getBuffer(y_test, y_test_buffer, PyBUF_STRIDES)
 
 let
-  # c demo is tricky here - to work in Nim, must initialize the void pointer as
-  # it seems that the default intialization in Nim is nil
-  train: DMatrixHandle = alloc(sizeof(DMatrixHandle))
-  test: DMatrixHandle = alloc(sizeof(DMatrixHandle))
+  train: DMatrixHandle = cast[DMatrixHandle](ptrInitializer)
+  test: DMatrixHandle = cast[DMatrixHandle](ptrInitializer)
 
+# serialized version
 safe_xgboost: XGDMatrixCreateFromMat(cast[ptr cfloat](X_train_buffer.buf),
   train_rows, train_cols, 999999999.0, train.unsafeAddr())
 safe_xgboost: XGDMatrixCreateFromMat(cast[ptr cfloat](X_test_buffer.buf),
   test_rows, test_cols, 999999999.0, test.unsafeAddr())
 
+# # parallelized version
+# safe_xgboost: XGDMatrixCreateFromMat_omp(cast[ptr cfloat](X_train_buffer.buf),
+#   train_rows, train_cols, 999999999.0, train.unsafeAddr(), -1)
+# safe_xgboost: XGDMatrixCreateFromMat_omp(cast[ptr cfloat](X_test_buffer.buf),
+#   test_rows, test_cols, 999999999.0, test.unsafeAddr(), -1)
 
 # 3. Create a Booster object for training & testing on dataset using XGBoosterCreate
-let booster: BoosterHandle = alloc(sizeof(BoosterHandle))
+let booster: BoosterHandle = cast[BoosterHandle](ptrInitializer)
 
 # need this at compiletime to create array below (could have used {compileTime} pragma also)
 const eval_dmats_size: bst_ulong = 2
@@ -120,12 +130,12 @@ safe_xgboost: XGDMatrixSetFloatInfo(test, "label", cast[ptr cfloat](y_test_buffe
 # stick to using pointers and pointer arithmetic.
 var
   out_len: bst_ulong
-  out_dptr: ptr ptr cfloat = cast[ptr ptr cfloat](alloc(sizeof(pointer)))
+  out_dptr: ptr ptr cfloat = cast[ptr ptr cfloat](ptrInitializer)   # (alloc(sizeof(pointer)))
 safe_xgboost: XGDMatrixGetFloatInfo(train, "label", out_len.addr(), out_dptr)
 
 echo "Number of labels in training set: $1" % [$out_len]
 for i in 0..<out_len:
-  var value: cfloat = cast[ptr cfloat](cast[uint](out_dptr[]) + cast[uint](sizeof(cfloat)) * i)[]
+  var value: cfloat = cast[ptr cfloat](cast[uint](out_dptr[]) + uint(sizeof(cfloat)) * i)[]
   echo "Label $1: $2" % [$i, &"{value:.0f}"]
   if i >= 10:
     break
@@ -146,7 +156,7 @@ safe_xgboost: XGBoosterSetParam(booster, "eta", "0.1")   # default eta  = 0.3
 # XGBoosterEvalOneIter respectively.
 let
   num_of_iterations: cint = 50
-  eval_result: ptr cstring = cast[ptr cstring](alloc0(sizeof(pointer)))
+  eval_result: ptr cstring = cast[ptr cstring](ptrInitializer)
   names: array[2, cstring] = [cstring("train"), cstring("test")]
   eval_names: ptr cstring = cast[ptr cstring](names.unsafeAddr())
 
@@ -156,7 +166,7 @@ for i in 0..<num_of_iterations:
 
   # Give the statistics for the learner for training & testing dataset in terms
   # of error after each iteration
-  safe_xgboost: XGBoosterEvalOneIter(booster, i, eval_dmats, eval_names,
+  safe_xgboost: XGBoosterEvalOneIter(booster, i, eval_dmats, cast[ptr cstring](eval_names),
     eval_dmats_size, eval_result)
   stdout.writeline("$1" % [$eval_result[]])
 echo()
@@ -167,7 +177,7 @@ safe_xgboost: XGBoosterSaveModel(booster, "xgb_model_nim.xgb")
 # 7. Predict the result on the test set using XGBoosterPredict
 var
   output_length: bst_ulong
-  output_result: ptr cfloat = cast[ptr cfloat](alloc(sizeof(pointer)))
+  output_result: ptr cfloat = cast[ptr cfloat](ptrInitializer)
 
 safe_xgboost: XGBoosterPredict(booster, test, 0, 0, 0, output_length.addr(),
   output_result.addr())
@@ -178,6 +188,7 @@ for i in 0..<output_length:
   echo "prediction[$1] = $2" % [$i, &"{value:.5f}"]
   if i >= 10:
     break
+
 
 # 8. Free all the internal structure used in your code using XGDMatrixFree and
 # XGBoosterFree. This step is important to prevent memory leak.
@@ -192,7 +203,8 @@ X_test_buffer.release()
 y_train_buffer.release()
 y_test_buffer.release()
 
-# and allocated pointers...
+# and the allocated pointer intializer
+dealloc(ptrInitializer)
 
 # Skip 9
 # 9. Get the number of features in your dataset using XGBoosterGetNumFeature.
