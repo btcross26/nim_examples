@@ -17,9 +17,16 @@ elif defined(linux):
 elif defined(windows):
   let libName: string = "libxgboost.dll"
 
-# defining convenience type for CArray
-type
-  CArray[T] = UncheckedArray[T]
+# use a Nim template to (for the most part) mimic the #define safe_xgboost stmt
+# in the XGBoost C API code
+template safe_xgboost(procCall: untyped) =
+  let err: cint = procCall
+  if err != 0:
+    let pos = instantiationInfo()   # to get the current file and line number
+    # use stderr in Nim to write to stderr, as opposed to fprintf in safe_xgboost
+    stderr.writeLine("$1:$2: error in $3: $4\n" % [pos.filename, $pos.line,
+      "xgboost api call", $XGBGetLastError()])
+    quit(1)   # replaces C++ exit(1)
 
 # C++ wrappers for using the XGBoost C API as in the example here
 # https://xgboost.readthedocs.io/en/latest/dev/c__api_8h.html
@@ -27,26 +34,54 @@ type
 type
   DMatrixHandle = pointer   # pointer can be used for void * vs. ptr type
   BoosterHandle = pointer
-  # for CArrays that do not have a specified size for readability purposes
-  # some trickiness though. Arrays in Nims are NEVER pointers. So the types passed
-  # below for a C++ arg likeso, `DMatrixHandle dmats[]`, will be `ptr CArray[DMatrixHandle]`
   bst_ulong = culonglong
 
+# API function wrappers
 proc XGDMatrixCreateFromFile(fname: cstring, silent: cint, `out`: ptr DMatrixHandle): cint
-# note the backticks below for the `out` parameter mask the 'out' keyword (this may
-# not be necessary, could just use a diff arg name?)
+
 proc XGDMatrixCreateFromMat(data: ptr cfloat, nrow: bst_ulong, ncol: bst_ulong,
   missing: cfloat, `out`: ptr DMatrixHandle): cint
+
 proc XGBGetLastError(): cstring
-proc XGBoosterCreate (dmats: ptr CArray[DMatrixHandle], len: bst_ulong, `out`: ptr BoosterHandle): cint
+
+proc XGBoosterCreate(dmats: ptr DMatrixHandle, len: bst_ulong, `out`: ptr BoosterHandle): cint
+
 proc XGBoosterSetParam(handle: BoosterHandle, name: cstring, value: cstring): cint
-proc XGDMatrixSetDenseInfo(handle: DMatrixHandle, field: cstring, data: pointer, size: bst_ulong, `type`: cint): cint
-proc XGDMatrixSetFloatInfo (handle: DMatrixHandle, field: cstring, array: ptr cfloat, len: bst_ulong): cint
+
+proc XGDMatrixNumCol(handle: DMatrixHandle, `out`: ptr bst_ulong): cint
+
+proc XGDMatrixNumRow(handle: DMatrixHandle, `out`: ptr bst_ulong): cint
+
+proc XGDMatrixSetFloatInfo(handle: DMatrixHandle, field: cstring, array: ptr cfloat, len: bst_ulong): cint
+
+proc XGDMatrixSetDenseInfo(handle: DMatrixHandle, field: cstring, data: pointer,
+  size: bst_ulong, `type`: cint): cint
+
+proc XGDMatrixSetUIntInfo(handle: DMatrixHandle, field: cstring, array: ptr cuint, len: bst_ulong): cint
+
+proc XGDMatrixGetFloatInfo(handle: DMatrixHandle, field: cstring, out_len: ptr bst_ulong,
+  out_dptr: ptr ptr cfloat): cint
+
+proc XGDMatrixGetUIntInfo(handle: DMatrixHandle, field: cstring, out_len: ptr bst_ulong,
+  out_dptr: ptr ptr float): cint
+
 proc XGBoosterUpdateOneIter(handle: BoosterHandle, iter: cint, dtrain: DMatrixHandle): cint
-# below, as per Nim docs cstringArray is equivalent to ptr UncheckedArray[cstring] = ptr CArray[cstring]
-proc XGBoosterEvalOneIter(handle: BoosterHandle, iter: int, dmats: ptr CArray[DMatrixHandle],
-  evnames: cstringArray, len: bst_ulong, out_result: cstringArray): cint
-proc XGBoosterPredict (handle: BoosterHandle, dmat: DMatrixHandle, option_mask: cint,
+
+proc XGBoosterEvalOneIter(handle: BoosterHandle, iter: int, dmats: ptr DMatrixHandle,
+  evnames: ptr cstring, len: bst_ulong, out_result: ptr cstring): cint
+
+proc XGBoosterPredict(handle: BoosterHandle, dmat: DMatrixHandle, option_mask: cint,
   ntree_limit: cuint, training: cint, out_len: ptr bst_ulong,
-  out_result: ptr CArray[ptr cfloat]): cint
+  out_result: ptr ptr cfloat): cint
+
+proc XGDMatrixFree(dmatrix: DMatrixHandle): cint
+
+proc XGBoosterFree(booster: BoosterHandle): cint
+
+proc XGBoosterSaveModel(handle: BoosterHandle, fname: cstring): cint
+
+proc XGBoosterLoadModel(handle: BoosterHandle, fname: cstring): cint
+
+proc XGBoosterLoadModelFromBuffer(handle: BoosterHandle, buf: pointer,
+  len: bst_ulong): cint
 {.pop.}

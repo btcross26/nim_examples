@@ -6,6 +6,10 @@
 # --passL:"-lxgboost"
 # --passL:"-rpath $HOME/anaconda3/envs/nim_demo/lib"
 
+# dealloc train, test, booster, train_labels, test_labels
+# dmatrix values and booster
+# release np buffers at bottom
+
 # author: Benjamin Cross
 # created: 2021-03-31
 
@@ -14,32 +18,23 @@
 include xgboost_wrapper
 
 import strutils
-import nimpy
-
-# use a Nim template to (for the most part) mimic the #define safe_xgboost stmt
-# in the XGBoost C API code
-template safe_xgboost(procCall: untyped) =
-  let err: cint = procCall
-  if err != 0:
-    let pos = instantiationInfo()             # to get the current file and line number
-    # use stderr in Nim to write to stderr, as opposed to fprintf in safe_xgboost
-    stderr.writeLine("$1:$2: error in $3: $4\n" % [pos.filename, $pos.line,
-      procCall.repr, $XGBGetLastError()])
-    quit(1)   # replaces C++ exit(1)
-
+import strformat
+import nimpy, nimpy/[py_types, raw_buffers]
 
 # the code below is taken directly from the xgboost C API example and modified
 # accordingly to work with Nim syntax and the example dataset
 # https://xgboost.readthedocs.io/en/latest/tutorials/c_api_tutorial.html
 
+# Skip step 1 below, since step 2 will be used.
 # 1. If the dataset is available in a file, it can be loaded into a DMatrix
 #    object using the XGDMatrixCreateFromFile
+# 2. You can also create a DMatrix object from a 2D Matrix using the
+#    XGDMatrixCreateFromMat function
 
 # let's use Python here to create the data as per nimpy instructions
 # it's actually not THAT different from Python, but not all convenience is available
 # since everything returned is a PyObject. For example, I can't unpack a PyObject
 # tuple directly in Nim without creating a Nim tuple, as shown below.
-let py = pyBuiltinsModule()
 let sklearn_datasets = pyImport("sklearn.datasets")
 let sklearn_ms = pyImport("sklearn.model_selection")
 let np = pyImport("numpy")
@@ -48,121 +43,156 @@ let datasets = sklearn_datasets.make_classification(n_samples=10000, n_features=
 let X = datasets[0]
 let y = datasets[1]
 let splits = sklearn_ms.train_test_split(X, y, test_size=0.2, random_state=17, stratify=y)
-let (X_train, X_test, y_train, y_test) = (splits[0], splits[1], splits[2], splits[3])
+var (X_train, X_test, y_train, y_test) = (splits[0], splits[1], splits[2], splits[3])
 
-# save files as txt (rather than going through the trouble of conversion to float32)
-# Nim by default throws an error if a function returns a value and is not used
-# I'm assuming Python returns None here - the discard is used to tell the Nim
-# compiler explicitly that the return value is not used
-discard np.savetxt("X_train.csv", X_train, delimiter=',')
-discard np.savetxt("X_test.csv", X_test, delimiter=',')
-discard np.savetxt("y_train.csv", y_train, delimiter=',')
-discard np.savetxt("y_test.csv", y_test, delimiter=',')
+# Cast the above arrays to float32 for use with xgboost. Note: Have to use the
+# string type shortcuts here to avoid collisions with Nim. For example,np.float32
+# resolves in Nim to float32(np). So Nim thinks you are trying to cast np, which
+# is a PyObject, to the native float32 type, and the compiler will tell you so.
+X_train = X_train.astype("f4")
+X_test = X_test.astype("f4")
+y_train = y_train.astype("f4")
+y_test = y_test.astype("f4")
 
-# Load the data from files & store it in data variable of DMatrixHandle datatype
-# Assumes that the datafiles are in the current working directory
-
-var
-  # c demo is tricky here - to work in Nim, must initialize the void pointer
-  # it seems that the default intialization in Nim is nil
-  train: DMatrixHandle = alloc(sizeof(pointer))
-  test: DMatrixHandle = alloc(sizeof(pointer))
-
-safe_xgboost: XGDMatrixCreateFromFile("./X_train.csv?format=csv", 1, train.unsafeAddr())
-safe_xgboost: XGDMatrixCreateFromFile("./X_test.csv?format=csv", 1, test.unsafeAddr())
+# Get sizes. Use the nimpy `to` proc to cast from a PyObject to the type I want.
+# The `to` proc basically dereferences the PyObject pointer and skips over the
+# initial memory overhead required of the Python object for storing reference
+# counts etc., all the while casting the pointer back to a Nim type and
+# dereferencing via automatic dereferencing . The definition from nimpy:
+# proc to*(v: PyObject, T: typedesc): T {.inline.} =
+#   when T is void:
+#     discard
+#   else:
+#     pyObjToNim(v.rawPyObj, result)
 #
-# # 2. Skip this step as loading data from file
-# # 3. Create a Booster object for training & testing on dataset using XGBoosterCreate
-# var booster: BoosterHandle
-# # need this at compiletime to create array below (could have used {compileTime} pragma also)
-# const eval_dmats_size: bst_ulong = 2
-# # We assume that training and test data have been loaded into 'train' and 'test'
-# # Below was tricky, but arrays are never pointers in Nim, so to get the interface
-# # right and get used to this will take some work
-# let train_test_array: array[eval_dmats_size, DMatrixHandle] = [train, test]
-# let eval_dmats = cast[ptr UncheckedArray[DMatrixHandle]](unsafeAddr(train_test_array[0]))
-# safe_xgboost: XGBoosterCreate(eval_dmats, eval_dmats_size, booster.unsafeAddr())
+# There is also an overloaded version of this that works with type PPyObject,
+# which is the type of PyObject.rawPyObj
+let
+  train_rows: bst_ulong = X_train.shape[0].to(bst_ulong)
+  train_cols: bst_ulong = X_train.shape[1].to(bst_ulong)
+  test_rows: bst_ulong = X_test.shape[0].to(bst_ulong)
+  test_cols: bst_ulong = X_test.shape[1].to(bst_ulong)
+
+# Create buffers to the numpy data created above using nimpy functionality
+var
+  X_train_buffer: RawPyBuffer
+  X_test_buffer: RawPyBuffer
+  y_train_buffer: RawPyBuffer
+  y_test_buffer: RawPyBuffer
+getBuffer(X_train, X_train_buffer, PyBUF_STRIDES)
+getBuffer(X_test, X_test_buffer, PyBUF_STRIDES)
+getBuffer(y_train, y_train_buffer, PyBUF_STRIDES)
+getBuffer(y_test, y_test_buffer, PyBUF_STRIDES)
+
+let
+  # c demo is tricky here - to work in Nim, must initialize the void pointer as
+  # it seems that the default intialization in Nim is nil
+  train: DMatrixHandle = alloc(sizeof(DMatrixHandle))
+  test: DMatrixHandle = alloc(sizeof(DMatrixHandle))
+
+safe_xgboost: XGDMatrixCreateFromMat(cast[ptr cfloat](X_train_buffer.buf),
+  train_rows, train_cols, 999999999.0, train.unsafeAddr())
+safe_xgboost: XGDMatrixCreateFromMat(cast[ptr cfloat](X_test_buffer.buf),
+  test_rows, test_cols, 999999999.0, test.unsafeAddr())
+
+
+# 3. Create a Booster object for training & testing on dataset using XGBoosterCreate
+let booster: BoosterHandle = alloc(sizeof(BoosterHandle))
+
+# need this at compiletime to create array below (could have used {compileTime} pragma also)
+const eval_dmats_size: bst_ulong = 2
+
+# Below was tricky, but arrays are never pointers in Nim, so to get the interface
+# right and get used to this will take some work
+let
+  train_test_array: array[eval_dmats_size, DMatrixHandle] = [train, test]
+  eval_dmats: ptr DMatrixHandle = cast[ptr DMatrixHandle](train_test_array.unsafeAddr())
+safe_xgboost: XGBoosterCreate(eval_dmats, eval_dmats_size, booster.unsafeAddr())
+
 
 # 4. For each DMatrix object, set the labels using XGDMatrixSetFloatInfo. Later
-# you can access the label using XGDMatrixGetFloatInfo.
-# const int ROWS=5, COLS=3;
-# const int data[ROWS][COLS] = { {1, 2, 3}, {2, 4, 6}, {3, -1, 9}, {4, 8, -1}, {2, 5, 1}, {0, 1, 5} };
-# DMatrixHandle dmatrix;
-#
-# safe_xgboost: XGDMatrixCreateFromMat(data, ROWS, COLS, -1, &dmatrix)
-#
-# // variable to store labels for the dataset created from above matrix
-# float labels[ROWS];
-#
-# for (int i = 0; i < ROWS; i++) {
-#   labels[i] = i;
-# }
-#
-# // Loading the labels
-# safe_xgboost: XGDMatrixSetFloatInfo(dmatrix, "labels", labels, ROWS)
-#
-# // reading the labels and store the length of the result
-# bst_ulong result_len;
-#
-# // labels result
-# const float *result;
-#
-# safe_xgboost: XGDMatrixGetFloatInfo(dmatrix, "labels", &result_len, &result)
-#
-# for(unsigned int i = 0; i < result_len; i++) {
-#   printf("label[%i] = %f\n", i, result[i]);
-# }
-#
-#
-# # 5. Set the parameters for the Booster object according to the requirement
-# # using XGBoosterSetParam . Check out the full list of parameters available
-# # here.
-# BoosterHandle booster;
-# safe_xgboost: XGBoosterSetParam(booster, "booster", "gblinear")
-# safe_xgboost: XGBoosterSetParam(booster, "max_depth", "3")
-# # default eta  = 0.3
-# safe_xgboost: XGBoosterSetParam(booster, "eta", "0.1")
-#
-# # 6. Train & evaluate the model using XGBoosterUpdateOneIter and
-# # XGBoosterEvalOneIter respectively.
-# let num_of_iterations: int = 20
-# const char* eval_names[eval_dmats_size] = {"train", "test"};
-# const char* eval_result = NULL;
-#
-# for (int i = 0; i < num_of_iterations; ++i) {
-#   // Update the model performance for each iteration
-#   safe_xgboost: XGBoosterUpdateOneIter(booster, i, train)
-#
-#   // Give the statistics for the learner for training & testing dataset in terms of error after each iteration
-#   safe_xgboost: XGBoosterEvalOneIter(booster, i, eval_dmats, eval_names, eval_dmats_size, &eval_result)
-#   printf("%s\n", eval_result);
-# }
-#
-# # 7. Predict the result on a test set using XGBoosterPredict
-# var
-#   output_length: bst_ulong
-#   output_result: ptr float
-#
-# safe_xgboost: XGBoosterPredict(booster, test, 0, 0, &output_length, &output_result)
-#
-# for i in 0..<output_length:
-#   echo "prediction[%i] = %f \n", i, output_result[i])
-#
-# # 8. Free all the internal structure used in your code using XGDMatrixFree and
-# # XGBoosterFree. This step is important to prevent memory leak.
-# safe_xgboost: XGDMatrixFree(dmatrix)
-# safe_xgboost: XGBoosterFree(booster)
-#
-# # 9. Get the number of features in your dataset using XGBoosterGetNumFeature.
-#
-# var num_of_features: bst_ulong = 0
-#
-# // Assuming booster variable of type BoosterHandle is already declared
-# // and dataset is loaded and trained on booster
-# // storing the results in num_of_features variable
-# safe_xgboost: XGBoosterGetNumFeature(booster, num_of_features)
-#
-# // Printing number of features by type conversion of num_of_features variable from bst_ulong to unsigned long
-# printf("num_feature: %lu\n", (unsigned long)(num_of_features));
-#
-# # Save the model (not in example)
+# you can access the label using XGDMatrixGetFloatInfo (see example link)
+safe_xgboost: XGDMatrixSetFloatInfo(train, "label", cast[ptr cfloat](y_train_buffer.buf), train_rows)
+safe_xgboost: XGDMatrixSetFloatInfo(test, "label", cast[ptr cfloat](y_test_buffer.buf), test_rows)
+
+# note: UncheckedArray is unintuitive when it comes to passing a pointer to a
+# C function for purposes of storing data. It seems easier and more fool-proof to
+# stick to using pointers and pointer arithmetic.
+var
+  out_len: bst_ulong
+  out_dptr: ptr ptr cfloat = cast[ptr ptr cfloat](alloc(sizeof(pointer)))
+safe_xgboost: XGDMatrixGetFloatInfo(train, "label", out_len.addr(), out_dptr)
+
+echo "Number of labels in training set: $1" % [$out_len]
+for i in 0..<out_len:
+  var value: cfloat = cast[ptr cfloat](cast[uint](out_dptr[]) + cast[uint](sizeof(cfloat)) * i)[]
+  echo "Label $1: $2" % [$i, &"{value:.0f}"]
+  if i >= 10:
+    break
+echo()
+
+
+# 5. Set the parameters for the Booster object according to the requirement
+# using XGBoosterSetParam . Check out the full list of parameters available
+# here.
+safe_xgboost: XGBoosterSetParam(booster, "booster", "gblinear")
+safe_xgboost: XGBoosterSetParam(booster, "objective", "binary:logistic")
+safe_xgboost: XGBoosterSetParam(booster, "eval_metric", "auc")
+safe_xgboost: XGBoosterSetParam(booster, "max_depth", "3")
+safe_xgboost: XGBoosterSetParam(booster, "eta", "0.1")   # default eta  = 0.3
+
+
+# 6. Train & evaluate the model using XGBoosterUpdateOneIter and
+# XGBoosterEvalOneIter respectively.
+let
+  num_of_iterations: cint = 50
+  eval_result: ptr cstring = cast[ptr cstring](alloc0(sizeof(pointer)))
+  names: array[2, cstring] = [cstring("train"), cstring("test")]
+  eval_names: ptr cstring = cast[ptr cstring](names.unsafeAddr())
+
+for i in 0..<num_of_iterations:
+  # Update the model performance for each iteration
+  safe_xgboost: XGBoosterUpdateOneIter(booster, i, train)
+
+  # Give the statistics for the learner for training & testing dataset in terms
+  # of error after each iteration
+  safe_xgboost: XGBoosterEvalOneIter(booster, i, eval_dmats, eval_names,
+    eval_dmats_size, eval_result)
+  stdout.writeline("$1" % [$eval_result[]])
+echo()
+
+# save the model (not in the C API example)
+safe_xgboost: XGBoosterSaveModel(booster, "xgb_model_nim.xgb")
+
+# 7. Predict the result on the test set using XGBoosterPredict
+var
+  output_length: bst_ulong
+  output_result: ptr cfloat = cast[ptr cfloat](alloc(sizeof(pointer)))
+
+safe_xgboost: XGBoosterPredict(booster, test, 0, 0, 0, output_length.addr(),
+  output_result.addr())
+
+echo "First 10 predictions on the test set..."
+for i in 0..<output_length:
+  var value: cfloat = cast[ptr cfloat](cast[uint](output_result) + uint(sizeof(cfloat)) * i)[]
+  echo "prediction[$1] = $2" % [$i, &"{value:.5f}"]
+  if i >= 10:
+    break
+
+# 8. Free all the internal structure used in your code using XGDMatrixFree and
+# XGBoosterFree. This step is important to prevent memory leak.
+echo "\nFreeing up memory resources..."
+safe_xgboost: XGDMatrixFree(train)
+safe_xgboost: XGDMatrixFree(test)
+safe_xgboost: XGBoosterFree(booster)
+
+# also free Nim memory where necessary (e.g., numpy buffers)
+X_train_buffer.release()
+X_test_buffer.release()
+y_train_buffer.release()
+y_test_buffer.release()
+
+# and allocated pointers...
+
+# Skip 9
+# 9. Get the number of features in your dataset using XGBoosterGetNumFeature.
