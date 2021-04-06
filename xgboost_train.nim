@@ -18,6 +18,7 @@ include xgboost_wrapper
 
 import strutils
 import strformat
+from re import nil   # use qualified name here
 import nimpy, nimpy/[py_types, raw_buffers]
 
 # create a dummy allocated space for ptr initialization
@@ -130,7 +131,7 @@ safe_xgboost: XGDMatrixSetFloatInfo(test, "label", cast[ptr cfloat](y_test_buffe
 # stick to using pointers and pointer arithmetic.
 var
   out_len: bst_ulong
-  out_dptr: ptr ptr cfloat = cast[ptr ptr cfloat](ptrInitializer)   # (alloc(sizeof(pointer)))
+  out_dptr: ptr ptr cfloat = cast[ptr ptr cfloat](ptrInitializer)
 safe_xgboost: XGDMatrixGetFloatInfo(train, "label", out_len.addr(), out_dptr)
 
 echo "Number of labels in training set: $1" % [$out_len]
@@ -149,17 +150,24 @@ safe_xgboost: XGBoosterSetParam(booster, "booster", "gblinear")
 safe_xgboost: XGBoosterSetParam(booster, "objective", "binary:logistic")
 safe_xgboost: XGBoosterSetParam(booster, "eval_metric", "auc")
 safe_xgboost: XGBoosterSetParam(booster, "max_depth", "3")
-safe_xgboost: XGBoosterSetParam(booster, "eta", "0.1")   # default eta  = 0.3
+safe_xgboost: XGBoosterSetParam(booster, "eta", "0.05")   # default eta  = 0.3
 
 
 # 6. Train & evaluate the model using XGBoosterUpdateOneIter and
 # XGBoosterEvalOneIter respectively.
 let
-  num_of_iterations: cint = 50
+  num_of_iterations: cint = 1000
+  early_stopping_rounds: int = 25
+  check_index: int = early_stopping_rounds + 1
   eval_result: ptr cstring = cast[ptr cstring](ptrInitializer)
   names: array[2, cstring] = [cstring("train"), cstring("test")]
   eval_names: ptr cstring = cast[ptr cstring](names.unsafeAddr())
-
+  evalPattern: re.Regex = re.re(r".*:(0\.\d+).*:(0\.\d+).*")   # pick out auc values
+var
+  train_auc: seq[float64] = newSeqOfCap[float64](num_of_iterations)
+  test_auc: seq[float64] = newSeqOfCap[float64](num_of_iterations)
+  evalOut: string
+  re_matches: array[2, string]
 for i in 0..<num_of_iterations:
   # Update the model performance for each iteration
   safe_xgboost: XGBoosterUpdateOneIter(booster, i, train)
@@ -168,8 +176,30 @@ for i in 0..<num_of_iterations:
   # of error after each iteration
   safe_xgboost: XGBoosterEvalOneIter(booster, i, eval_dmats, cast[ptr cstring](eval_names),
     eval_dmats_size, eval_result)
-  stdout.writeline("$1" % [$eval_result[]])
+  evalOut = $eval_result[]   # initializing here apparently only runs once
+  stdout.writeline("$1" % [evalOut])
+
+  # store the train and test auc in a seq (there's got to be a function that
+  # makes this easier I would think)
+  discard re.match(evalOut, evalPattern, re_matches, 2)
+  train_auc.add(parseFloat(re_matches[0]))
+  test_auc.add(parseFloat(re_matches[1]))
+
+  # check easy early stopping criteria
+  var check_index: int = early_stopping_rounds + 1
+  if i >= early_stopping_rounds and train_auc[^1] <= train_auc[^check_index]:
+    break
 echo()
+
+# write out loss history data
+echo "Writing training history loss to file..."
+let f: File = open("training_history.csv", fmWrite)
+var lineStr: string
+for i in 0..high(train_auc):
+  lineStr = "$1,$2" % [&"{train_auc[i]:.6f}", &"{test_auc[i]:.6f}"]
+  f.writeLine(lineStr)
+f.close()
+
 
 # save the model (not in the C API example)
 safe_xgboost: XGBoosterSaveModel(booster, "xgb_model_nim.xgb")
