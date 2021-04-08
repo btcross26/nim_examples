@@ -2,7 +2,6 @@
 # so need to use --passL instead to specify xgboost library. Also, note the use
 # of anaconda here since this is being run in a conda environment with nim
 # installed.
-# -d:macOS
 # --cincludes:$HOME/anaconda3/envs/nim_demo/include
 # --clibdir:$HOME/anaconda3/envs/nim_demo/lib
 # --passL:"-lxgboost"
@@ -12,14 +11,12 @@
 # author: Benjamin Cross
 # created: 2021-03-31
 
-# include inserts file rather as opposed to import - so no need to worry about
-# exporting types with * in wrapper, etc.
-include xgboost_wrapper
-
 import strutils
 import strformat
 from re import nil   # use qualified name here
 import nimpy, nimpy/[py_types, raw_buffers]
+import xgboost_wrapper
+
 
 # create a dummy allocated space for ptr initialization
 # c demo is tricky here - to work in Nim, must initialize the void pointer as
@@ -42,15 +39,15 @@ let ptrInitializer: pointer = alloc0(1)
 # it's actually not THAT different from Python, but not all convenience is available
 # since everything returned is a PyObject. For example, I can't unpack a PyObject
 # tuple directly in Nim without creating a Nim tuple, as shown below.
-let sklearn_datasets = pyImport("sklearn.datasets")
-let sklearn_ms = pyImport("sklearn.model_selection")
-let np = pyImport("numpy")
-let datasets = sklearn_datasets.make_classification(n_samples=10000, n_features=10,
-  n_informative=5, n_redundant=2, random_state=17)
-let X = datasets[0]
-let y = datasets[1]
-let splits = sklearn_ms.train_test_split(X, y, test_size=0.2, random_state=17, stratify=y)
-var (X_train, X_test, y_train, y_test) = (splits[0], splits[1], splits[2], splits[3])
+let
+  sklearn_datasets = pyImport("sklearn.datasets")
+  sklearn_ms = pyImport("sklearn.model_selection")
+  datasets = sklearn_datasets.make_classification(n_samples=10000, n_features=10,
+    n_informative=5, n_redundant=2, random_state=17)
+  (X, y) = (datasets[0], datasets[1])
+  splits = sklearn_ms.train_test_split(X, y, test_size=0.2, random_state=17, stratify=y)
+var
+  (X_train, X_test, y_train, y_test) = (splits[0], splits[1], splits[2], splits[3])
 
 # Cast the above arrays to float32 for use with xgboost. Note: Have to use the
 # string type shortcuts here to avoid collisions with Nim. For example,np.float32
@@ -94,18 +91,26 @@ getBuffer(y_test, y_test_buffer, PyBUF_STRIDES)
 let
   train: DMatrixHandle = cast[DMatrixHandle](ptrInitializer)
   test: DMatrixHandle = cast[DMatrixHandle](ptrInitializer)
+  missing_value: cfloat = 999999999.0
 
 # serialized version
 safe_xgboost: XGDMatrixCreateFromMat(cast[ptr cfloat](X_train_buffer.buf),
-  train_rows, train_cols, 999999999.0, train.unsafeAddr())
+  train_rows, train_cols, missing_value, train.unsafeAddr())
 safe_xgboost: XGDMatrixCreateFromMat(cast[ptr cfloat](X_test_buffer.buf),
-  test_rows, test_cols, 999999999.0, test.unsafeAddr())
+  test_rows, test_cols, missing_value, test.unsafeAddr())
 
 # # parallelized version
 # safe_xgboost: XGDMatrixCreateFromMat_omp(cast[ptr cfloat](X_train_buffer.buf),
 #   train_rows, train_cols, 999999999.0, train.unsafeAddr(), -1)
 # safe_xgboost: XGDMatrixCreateFromMat_omp(cast[ptr cfloat](X_test_buffer.buf),
 #   test_rows, test_cols, 999999999.0, test.unsafeAddr(), -1)
+
+# set feature names
+var feature_names: seq[cstring] = newSeq[cstring](10)
+for i in 0..<10:
+  feature_names[i] = "f$1" % [$i]
+safe_xgboost: XGDMatrixSetStrFeatureInfo(train, "feature_name", feature_names[0].addr(),
+  10)
 
 # 3. Create a Booster object for training & testing on dataset using XGBoosterCreate
 let booster: BoosterHandle = cast[BoosterHandle](ptrInitializer)
@@ -186,8 +191,7 @@ for i in 0..<num_of_iterations:
   test_auc.add(parseFloat(re_matches[1]))
 
   # check easy early stopping criteria
-  var check_index: int = early_stopping_rounds + 1
-  if i >= early_stopping_rounds and train_auc[^1] <= train_auc[^check_index]:
+  if i >= early_stopping_rounds and test_auc[^1] <= test_auc[^check_index]:
     break
 echo()
 
@@ -199,10 +203,27 @@ for i in 0..high(train_auc):
   lineStr = "$1,$2" % [&"{train_auc[i]:.6f}", &"{test_auc[i]:.6f}"]
   f.writeLine(lineStr)
 f.close()
-
+echo()
 
 # save the model (not in the C API example)
 safe_xgboost: XGBoosterSaveModel(booster, "xgb_model_nim.xgb")
+
+# get feature names - realize that we already have these as they were set above.
+# But want to check that the 'get' function works properly
+let
+  feature_names_ptr: ptr ptr cstring = cast[ptr ptr cstring](ptrInitializer)
+  g: File = open("feature_names.txt", fmWrite)
+var feature: cstring
+safe_xgboost: XGDMatrixGetStrFeatureInfo(train, "feature_name", outlen.addr(), feature_names_ptr)
+echo "Number of features in dataset: $1" % [$outlen]
+echo "Feature Names:"
+for i in 0..<outlen:
+  feature = cast[ptr cstring](cast[uint](feature_names_ptr[]) + uint(sizeof(ptr cstring)) * i)[]
+  echo &"Feature {i:d}: {feature}"
+  g.writeLine(feature)
+g.close()
+echo()
+
 
 # 7. Predict the result on the test set using XGBoosterPredict
 var
