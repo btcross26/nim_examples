@@ -18,12 +18,14 @@ import nimpy, nimpy/[py_types, raw_buffers]
 import xgboost_wrapper
 
 
-# create a dummy allocated space for ptr initialization
+##### UNSAFE #####
+# create a dummy allocated space for ptr initialization when a
+# function requires a pointer argument for the purpose of copying data.
 # c demo is tricky here - to work in Nim, must initialize the void pointer as
 # it seems that the default intialization in Nim is nil. This pointer is used
 # as a common allocated space to intialize pointers so that they are not nil
 # and do not throw errors in the wrapped XGBoost interfaces.
-let ptrInitializer: pointer = alloc0(1)
+let ptrInitializer: pointer = alloc(0)
 
 # the code below is taken directly from the xgboost C API example and modified
 # accordingly to work with Nim syntax and the example dataset
@@ -89,9 +91,11 @@ getBuffer(y_train, y_train_buffer, PyBUF_STRIDES)
 getBuffer(y_test, y_test_buffer, PyBUF_STRIDES)
 
 let
-  train: DMatrixHandle = cast[DMatrixHandle](ptrInitializer)
-  test: DMatrixHandle = cast[DMatrixHandle](ptrInitializer)
+  # hard-coding this for now
   missing_value: cfloat = 999999999.0
+var
+  train: DMatrixHandle = ptrInitializer
+  test: DMatrixHandle = ptrInitializer
 
 # serialized version
 safe_xgboost: XGDMatrixCreateFromMat(cast[ptr cfloat](X_train_buffer.buf),
@@ -113,7 +117,7 @@ safe_xgboost: XGDMatrixSetStrFeatureInfo(train, "feature_name", feature_names[0]
   10)
 
 # 3. Create a Booster object for training & testing on dataset using XGBoosterCreate
-let booster: BoosterHandle = cast[BoosterHandle](ptrInitializer)
+var booster: BoosterHandle = ptrInitializer
 
 # need this at compiletime to create array below (could have used {compileTime} pragma also)
 const eval_dmats_size: bst_ulong = 2
