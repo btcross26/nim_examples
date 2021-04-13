@@ -84,6 +84,10 @@ proc XGBoosterLoadModelFromBuffer*(handle: BoosterHandle, buf: pointer,
 {.pop.}
 
 
+# create error type for XGB to be raised in safe_xgboost template
+type
+  XGBError* = object of CatchableError
+
 # use a Nim template to (for the most part) mimic the #define safe_xgboost stmt
 # in the XGBoost C API code
 template safe_xgboost*(procCall: untyped) =
@@ -93,8 +97,12 @@ template safe_xgboost*(procCall: untyped) =
   ##   safe_xgboost: XGBFunctionCall(...)
   let err: cint = procCall
   if err != 0:
-    let pos = instantiationInfo()   # to get the current file and line number
+    let
+      pos = instantiationInfo()   # to get the current file and line number
+      errMsg: string = $XGBGetLastError()
     # use stderr in Nim to write to stderr, as opposed to fprintf in safe_xgboost
     stderr.writeLine("$1:$2: error in $3: $4\n" % [pos.filename, $pos.line,
-      "xgboost api call", $XGBGetLastError()])
-    quit(1)   # replaces C++ exit(1)
+      "xgboost api call", errMsg])
+    # raise exception
+    raise newException(XGBError, errMsg)
+    # quit(1)   # replaces C++ exit(1)
