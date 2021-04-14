@@ -39,23 +39,15 @@ let
   modelBufferPtr: pointer = cast[pointer](binaryModelData[0].addr())
 
 # parse json payload to features (for use in the modelPredict library function)
-type
-  InvalidInputJsonError = object of CatchableError
 proc jsonToFeatures(jsonInputs: cstring):  seq[cfloat] =
-  try:
     let dataJson: JsonNode = parseJson($jsonInputs)
     var inputSeq: seq[cfloat] = newSeq[cfloat](featureNames.len())
     for i, feature in pairs(featureNames):
       inputSeq[i] = cfloat(dataJson[$feature].getFloat())
     result = inputSeq
-  except:
-    raise newException(InvalidInputJsonError, "invalid input json for model scoring")
 
 ########### Beginning of dynamic library definitions
 {.push cdecl, exportc, dynlib.}
-# validate the input json
-proc jsonIsValid(jsonInputs: cstring): bool =
-
 
 # load booster model
 proc loadModel() =
@@ -64,7 +56,7 @@ proc loadModel() =
   safe_xgboost: XGBoosterLoadModelFromBuffer(booster, modelBufferPtr, bstUlong(bufferLen))
 
 # predict model given json and return json response
-proc modelPredict(jsonInputs: cstring): cfloat =
+proc modelPredict(jsonInputs: cstring, score: ptr cfloat): cstring =
   var
     dmatrix: DMatrixHandle = ptrInitializer
     output_length: bst_ulong
@@ -73,14 +65,20 @@ proc modelPredict(jsonInputs: cstring): cfloat =
   # score model
   try:
     inputs = jsonToFeatures(jsonInputs)
+  except:
+    return "input json error"
+
+  try:
     safe_xgboost: XGDMatrixCreateFromMat(cast[ptr cfloat](inputs[0].unsafeAddr()),
       1, bst_ulong(inputs.len()), missing_value, dmatrix.addr())
     safe_xgboost: XGBoosterPredict(booster, dmatrix, 0, 0, 0, output_length.addr(),
         output_result.addr())
     safe_xgboost: XGDMatrixFree(dmatrix)
-    result = output_result[]
+    score[] = output_result[]
   except:
-    raise
+    return "XGBError: $1" % [$XGBGetLastError()]
+
+  return "OK"
 
 # deallocate the booster model
 proc freeModel() =
