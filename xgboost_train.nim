@@ -94,14 +94,15 @@ let
   # hard-coding this for now
   missing_value: cfloat = 999999999.0
 var
-  train: DMatrixHandle = ptrInitializer
-  test: DMatrixHandle = ptrInitializer
+  train: DMatrixHandle = cast[DMatrixHandle](ptrInitializer)
+  test: DMatrixHandle = cast[DMatrixHandle](ptrInitializer)
 
 # serialized version
-safe_xgboost: XGDMatrixCreateFromMat(cast[ptr cfloat](X_train_buffer.buf),
-  train_rows, train_cols, missing_value, train.unsafeAddr())
-safe_xgboost: XGDMatrixCreateFromMat(cast[ptr cfloat](X_test_buffer.buf),
-  test_rows, test_cols, missing_value, test.unsafeAddr())
+safe_xgboost:
+  XGDMatrixCreateFromMat(cast[ptr cfloat](X_train_buffer.buf),
+    train_rows, train_cols, missing_value, train.unsafeAddr())
+  XGDMatrixCreateFromMat(cast[ptr cfloat](X_test_buffer.buf),
+    test_rows, test_cols, missing_value, test.unsafeAddr())
 
 # # parallelized version
 # safe_xgboost: XGDMatrixCreateFromMat_omp(cast[ptr cfloat](X_train_buffer.buf),
@@ -117,7 +118,7 @@ safe_xgboost: XGDMatrixSetStrFeatureInfo(train, "feature_name", feature_names[0]
   10)
 
 # 3. Create a Booster object for training & testing on dataset using XGBoosterCreate
-var booster: BoosterHandle = ptrInitializer
+var booster: BoosterHandle = cast[BoosterHandle](ptrInitializer)
 
 # need this at compiletime to create array below (could have used {compileTime} pragma also)
 const eval_dmats_size: bst_ulong = 2
@@ -132,8 +133,9 @@ safe_xgboost: XGBoosterCreate(eval_dmats, eval_dmats_size, booster.unsafeAddr())
 
 # 4. For each DMatrix object, set the labels using XGDMatrixSetFloatInfo. Later
 # you can access the label using XGDMatrixGetFloatInfo (see example link)
-safe_xgboost: XGDMatrixSetFloatInfo(train, "label", cast[ptr cfloat](y_train_buffer.buf), train_rows)
-safe_xgboost: XGDMatrixSetFloatInfo(test, "label", cast[ptr cfloat](y_test_buffer.buf), test_rows)
+safe_xgboost:
+  XGDMatrixSetFloatInfo(train, "label", cast[ptr cfloat](y_train_buffer.buf), train_rows)
+  XGDMatrixSetFloatInfo(test, "label", cast[ptr cfloat](y_test_buffer.buf), test_rows)
 
 # note: UncheckedArray is unintuitive when it comes to passing a pointer to a
 # C function for purposes of storing data. It seems easier and more fool-proof to
@@ -155,11 +157,12 @@ echo()
 # 5. Set the parameters for the Booster object according to the requirement
 # using XGBoosterSetParam . Check out the full list of parameters available
 # here.
-safe_xgboost: XGBoosterSetParam(booster, "booster", "gblinear")
-safe_xgboost: XGBoosterSetParam(booster, "objective", "binary:logistic")
-safe_xgboost: XGBoosterSetParam(booster, "eval_metric", "auc")
-safe_xgboost: XGBoosterSetParam(booster, "max_depth", "3")
-safe_xgboost: XGBoosterSetParam(booster, "eta", "0.05")   # default eta  = 0.3
+safe_xgboost:
+  XGBoosterSetParam(booster, "booster", "gblinear")
+  XGBoosterSetParam(booster, "objective", "binary:logistic")
+  XGBoosterSetParam(booster, "eval_metric", "auc")
+  XGBoosterSetParam(booster, "max_depth", "3")
+  XGBoosterSetParam(booster, "eta", "0.1")   # default eta  = 0.3
 
 
 # 6. Train & evaluate the model using XGBoosterUpdateOneIter and
@@ -248,9 +251,10 @@ for i in 0..<output_length:
 # 8. Free all the internal structure used in your code using XGDMatrixFree and
 # XGBoosterFree. This step is important to prevent memory leak.
 echo "\nFreeing up memory resources..."
-safe_xgboost: XGDMatrixFree(train)
-safe_xgboost: XGDMatrixFree(test)
-safe_xgboost: XGBoosterFree(booster)
+safe_xgboost:
+  XGDMatrixFree(train)
+  XGDMatrixFree(test)
+  XGBoosterFree(booster)
 
 # also free Nim memory where necessary (e.g., numpy buffers)
 X_train_buffer.release()
