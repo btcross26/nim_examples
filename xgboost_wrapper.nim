@@ -8,6 +8,7 @@
 # author: Benjamin Cross
 # created: 2021-03-31
 
+import macros
 
 when defined(macos) or defined(macosx):
   const libName: string = "libxgboost.dylib"
@@ -20,8 +21,11 @@ elif defined(windows):
 # https://xgboost.readthedocs.io/en/latest/dev/c__api_8h.html
 {.push cdecl, header: "xgboost/c_api.h", importc, dynlib: libName.}
 type
-  DMatrixHandle* = pointer   # pointer can be used for void * vs. ptr type
-  BoosterHandle* = pointer
+  # void pointer types - the distinct keyword here helps to make these more type
+  # safe than without, as then any void pointer could be used in a wrapped
+  # function call without being caught by the compiler.
+  DMatrixHandle* = distinct pointer
+  BoosterHandle* = distinct pointer
   bst_ulong* = culonglong
 
 # API function wrappers
@@ -90,11 +94,12 @@ type
 
 # use a Nim template to (for the most part) mimic the #define safe_xgboost stmt
 # in the XGBoost C API code
-template safe_xgboost*(procCall: untyped) =
+template safe_xgboost_call*(procCall: untyped) =
   ## Mimic the safe_xgboost #define procedure in the C API
   ##
   ## Usage for some arbitrary call, XGBFunctionCall(...)
   ##   safe_xgboost: XGBFunctionCall(...)
+  # let err: cint = procCall
   let err: cint = procCall
   if err != 0:
     let
@@ -106,3 +111,12 @@ template safe_xgboost*(procCall: untyped) =
     # raise exception
     raise newException(XGBError, errMsg)
     # quit(1)   # replaces C++ exit(1)
+
+
+# Macro to wrap multiple xgboost calls if needed
+macro safe_xgboost*(stmts: untyped): untyped =
+  ## Create a safe_xgboost block that can have multiple XGB calls in a row
+  ## within the same block.
+  result = newStmtList()
+  for stmt in items(stmts):
+    result.add(newCall(newIdentNode("safe_xgboost_call"), stmt))
