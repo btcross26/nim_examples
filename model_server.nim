@@ -10,10 +10,21 @@ import asynchttpserver
 import times
 import strutils
 import json
+import logging
+
+when defined(macos) or defined(macosx):
+  const libName: string = "libxgbmodel.dylib"
+elif defined(linux):
+  const libName: string = "libxgbmodel.so"
+elif defined(windows):
+  const libName: string = "libxgbmodel.dll"
+
+static:
+  echo libName  # prints during compilation
 
 
 # dynamic library declarations
-{.push cdecl, importc, dynlib: "libxgbmodel.dylib".}
+{.push cdecl, importc, dynlib: libName.}
 proc loadModel()
 proc modelPredict(jsonInputs: cstring, score: var cfloat): cstring   # var type works here
 proc freeModel()
@@ -21,7 +32,13 @@ proc freeModel()
 
 
 # proc for responding to a score request
-proc cb(req: Request): Future[void] {.async.} =
+proc cb(req: Request): Future[void] {.async, gcsafe.} =
+  # setup logging (since async - can't use global
+  var logger = newConsoleLogger(fmtStr="[$time] - $levelname: ")
+  addHandler(logger)
+
+  logger.log(lvlInfo, "$1 Request - $2 - $3 - $4 - $5" % [$req.protocol.orig,
+    $req.reqMethod, $req.headers, $req.hostname, $req.body])
   let headers = {
     "Timestamp": $now(),
     "Content-type": "application/json"
@@ -47,6 +64,8 @@ proc cb(req: Request): Future[void] {.async.} =
     outputJson["status"] = %"invalid request type"
     code = Http405
   await req.respond(code, pretty(outputJson) & "\c\L", responseHeaders)
+  logger.log(lvlInfo, "HTTP/1.1 Response - $1 - $2 - $3" % [$code,
+    $responseHeaders, $outputJson])
 
 
 # main server function

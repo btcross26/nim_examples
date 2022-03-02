@@ -51,14 +51,15 @@ proc jsonToFeatures(jsonInputs: cstring):  seq[cfloat] =
 
 # load booster model
 proc loadModel() =
-  booster = ptrInitializer
-  safe_xgboost: XGBoosterCreate(nil, 0, booster.unsafeAddr())
-  safe_xgboost: XGBoosterLoadModelFromBuffer(booster, modelBufferPtr, bstUlong(bufferLen))
+  booster = cast[BoosterHandle](ptrInitializer)
+  safe_xgboost:
+    XGBoosterCreate(nil, 0, booster.unsafeAddr())
+    XGBoosterLoadModelFromBuffer(booster, modelBufferPtr, bstUlong(bufferLen))
 
 # predict model given json and return json response
 proc modelPredict(jsonInputs: cstring, score: ptr cfloat): cstring =
   var
-    dmatrix: DMatrixHandle = ptrInitializer
+    dmatrix: DMatrixHandle = cast[DMatrixHandle](ptrInitializer)
     output_length: bst_ulong
     output_result: ptr cfloat = cast[ptr cfloat](ptrInitializer)
     inputs: seq[cfloat]
@@ -83,7 +84,7 @@ proc modelPredict(jsonInputs: cstring, score: ptr cfloat): cstring =
 # deallocate the booster model
 proc freeModel() =
   safe_xgboost: XGBoosterFree(booster)
-  booster = ptrInitializer
+  booster = cast[BoosterHandle](ptrInitializer)
 {.pop.}
 ########### End of dynamic library definitions
 
